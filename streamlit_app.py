@@ -1,61 +1,78 @@
 import streamlit as st
 import requests
+import uuid
 
-# Point to your local FastAPI backend
-API_URL = "http://127.0.0.1:8000"
+# Configuration
+API_URL = "http://127.0.0.1:8000/chat"
+UPLOAD_URL = "http://127.0.0.1:8000/upload"
 
-st.set_page_config(page_title="Philosophical RAG Assistant", page_icon="📚")
-st.title("Philosophical RAG Assistant 📚")
+st.set_page_config(page_title="Philosophical CRAG Chatbot", page_icon="🏛️", layout="centered")
+st.title("🏛️ Philosophical CRAG Assistant")
+st.caption("Powered by Gemini, LangGraph, and Corrective RAG Architecture")
 
-# --- Sidebar: Document Upload ---
+# ---------------------------------------------------------
+# Sidebar: Document Ingestion
+# ---------------------------------------------------------
 with st.sidebar:
-    st.header("1. Upload Books")
-    uploaded_files = st.file_uploader("Select PDF books", type=["pdf"], accept_multiple_files=True)
+    st.header("📚 Library Management")
+    st.write("Upload philosophical texts to expand the knowledge base.")
     
-    if st.button("Process & Save Books"):
-        if uploaded_files:
-            with st.spinner("Uploading to backend..."):
-                for uploaded_file in uploaded_files:
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                    try:
-                        response = requests.post(f"{API_URL}/upload/", files=files)
-                        if response.status_code == 200:
-                            st.success(response.json().get("message", "Uploaded successfully"))
-                        else:
-                            st.error(f"Failed to upload {uploaded_file.name}")
-                    except requests.exceptions.ConnectionError:
-                        st.error("Cannot connect to backend. Is FastAPI running?")
+    uploaded_file = st.file_uploader("Choose a file (PDF/TXT)", type=["pdf", "txt"])
+    
+    if st.button("Ingest Book"):
+        if uploaded_file is not None:
+            with st.spinner("Processing and chunking document..."):
+                try:
+                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                    response = requests.post(UPLOAD_URL, files=files)
+                    response.raise_for_status()
+                    st.success(f"Successfully ingested: {uploaded_file.name}")
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Failed to upload document. Ensure backend is running. Details: {e}")
         else:
-            st.warning("Please upload a file first.")
+            st.warning("Please select a file first.")
 
-# --- Main Area: Query & Response ---
-st.header("2. Ask a Question")
-query = st.text_area("Enter your philosophical question:")
+# ---------------------------------------------------------
+# Session State Initialization
+# ---------------------------------------------------------
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
 
-if st.button("Generate Answer"):
-    if query:
-        with st.spinner("Consulting the texts using Gemini..."):
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Greetings. I am your philosophical assistant. What concepts shall we explore today?"}
+    ]
+
+# ---------------------------------------------------------
+# Render Chat History
+# ---------------------------------------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ---------------------------------------------------------
+# Handle User Input
+# ---------------------------------------------------------
+if prompt := st.chat_input("Enter your philosophical inquiry..."):
+    
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Synthesizing context and reasoning..."):
             try:
-                # Send the query to the FastAPI backend
-                payload = {"query": query, "model_choice": "gemini-3.1-flash-lite"}
-                response = requests.post(f"{API_URL}/ask/", json=payload)
+                payload = {
+                    "thread_id": st.session_state.thread_id,
+                    "message": prompt
+                }
+                response = requests.post(API_URL, json=payload)
+                response.raise_for_status() 
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    st.markdown("### Answer")
-                    st.write(data["answer"])
-                    
-                    st.markdown("### Sources")
-                    with st.expander("View retrieved text chunks"):
-                        for i, source_text in enumerate(data.get("sources", [])):
-                            st.markdown(f"**Chunk {i + 1}:**")
-                            st.write(source_text)
-                            st.divider()
-                else:
-                    st.error(f"Backend error: {response.text}")
-                    
-            except requests.exceptions.ConnectionError:
-                st.error("Cannot connect to backend. Is FastAPI running?")
-    else:
-        st.warning("Please enter a question.")
+                ai_reply = response.json().get("response", "No response received.")
+                
+                st.markdown(ai_reply)
+                st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+
+            except requests.exceptions.RequestException as e:
+                st.error(f"**Error connecting to the backend.** Please ensure your FastAPI server is running. Details: `{e}`")

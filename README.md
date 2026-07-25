@@ -65,8 +65,7 @@ This tool allows users to upload PDF books, index them into a local vector datab
 ## 🚀 Installation
 
 ```bash
-git clone <your-repo-url>
-cd <your-project-folder>
+git clone https://github.com/arjunverma2004/improved-philosophical-rag.git
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
