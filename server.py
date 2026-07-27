@@ -42,7 +42,7 @@ async def chat_endpoint(request: ChatRequest):
         "question": request.message,
     }
         
-        result = app.invoke(inputs, config=config)
+        result = await app.ainvoke(inputs, config=config)
         
         final_message = result["messages"][-1].content
         return ChatResponse(response=final_message)

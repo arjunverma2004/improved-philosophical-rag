@@ -1,5 +1,8 @@
+import os
+import sqlite3
+
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from state import State
 from nodes import (
@@ -12,14 +15,34 @@ from nodes import (
 )
 from edges import route_after_eval
 
-def build_crag_graph():
-    """Builds and compiles the Corrective RAG (CRAG) graph."""
-    
-    # 1. Initialize Graph and Memory
-    g = StateGraph(State)
-    memory = MemorySaver()
+# ---------------------------------------------------------
+# Persistent (SQLite-backed) checkpointing
+# ---------------------------------------------------------
+DB_DIR = "checkpoints"
+DB_PATH = os.path.join(DB_DIR, "checkpoints.db")
+os.makedirs(DB_DIR, exist_ok=True)  # sqlite3 won't create the folder itself
 
-    # 2. Add CRAG Nodes
+# check_same_thread=False lets the same connection be used across
+# threads/async calls, which both FastAPI and Chainlit will do.
+_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+memory = SqliteSaver(_conn)
+memory.setup()  # creates the checkpoint tables if they don't exist yet
+
+
+def build_crag_graph(checkpointer=None):
+    """Builds and compiles the Corrective RAG (CRAG) graph.
+
+    Pass in whichever checkpointer matches how you'll call the graph:
+    - sync SqliteSaver (the module-level `memory` below) if you call
+      graph.invoke(...) — e.g. server.py, main.py
+    - AsyncSqliteSaver if you call graph.ainvoke(...) — e.g. chainlit_app.py,
+      which builds and passes its own instance.
+    """
+    if checkpointer is None:
+        checkpointer = memory
+
+    g = StateGraph(State)
+
     g.add_node("retrieve", retrieve_node)
     g.add_node("eval_each_doc", eval_each_doc_node)
     g.add_node("rewrite_query", rewrite_query_node)
@@ -27,11 +50,9 @@ def build_crag_graph():
     g.add_node("refine", refine)
     g.add_node("generate", generate_node)
 
-    # 3. Define Execution Flow
     g.add_edge(START, "retrieve")
     g.add_edge("retrieve", "eval_each_doc")
 
-    # The CRAG Conditional Edge: Decides whether to trust the local docs or search the web
     g.add_conditional_edges(
         "eval_each_doc",
         route_after_eval,
@@ -41,17 +62,15 @@ def build_crag_graph():
         }
     )
 
-    # Web Search Fallback Pathway
     g.add_edge("rewrite_query", "web_search")
     g.add_edge("web_search", "refine")
 
-    # Generation Pathway
     g.add_edge("refine", "generate")
     g.add_edge("generate", END)
 
-    # 4. Compile with Memory
-    app = g.compile(checkpointer=memory)
-    return app
+    return g.compile(checkpointer=checkpointer)
 
-# Export the compiled app
+
+# Default sync-checkpointed app, for callers that use .invoke() (sync):
+# e.g. server.py, main.py
 app = build_crag_graph()

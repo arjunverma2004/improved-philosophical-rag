@@ -13,3 +13,8 @@ pypdf
 langchain-chroma 
 langchain-experimental
 chromadb
+chainlit
+langgraph-checkpoint-sqlite
+langchain_huggingface
+sentence-transformers
+aiosqlite
