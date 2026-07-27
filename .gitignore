@@ -5,3 +5,7 @@ saved_responses/
 uploaded_books/
 books/
 __pycache__/
+checkpoints/
+.chainlit/
+chainlit.md
+chat_sessions.db
