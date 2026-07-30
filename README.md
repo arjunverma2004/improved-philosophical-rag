@@ -24,7 +24,13 @@ Ask it something like *"Why does the old man in* The Old Man and the Sea *descri
 
 ## Demo
 
-> *(Add a GIF or screenshots here — e.g. a streaming answer with visible `[1][2]` citations and the expandable source panel below it. This is the single highest-impact thing you can add to this README.)*
+<img width="1366" height="629" alt="Screenshot_20260730_215648" src="https://github.com/user-attachments/assets/20143795-85e4-4380-b9ed-097a676869da" />
+
+<img width="1366" height="629" alt="Screenshot_20260730_215839" src="https://github.com/user-attachments/assets/ce0e7c75-864c-4fa3-bf72-a3ed7d8a9eb8" />
+
+<img width="1366" height="627" alt="Screenshot_20260730_215822" src="https://github.com/user-attachments/assets/c6298307-5664-46a8-8634-b5abdb0a8f12" />
+
+<img width="1366" height="626" alt="Screenshot_20260730_215926" src="https://github.com/user-attachments/assets/d9e1d913-b5b3-4471-a931-ff5d035c5df4" />
 
 ---
 
@@ -101,7 +107,7 @@ A README that just lists features doesn't show engineering judgment. Here's the 
 
 | Decision | Why |
 |---|---|
-| **Service layer (`chat_service.py`) separate from API layer (`server.py`)** | The RAG/LangGraph logic doesn't know FastAPI exists. It can be unit-tested directly — call `stream_answer()`, `get_sources()` — with no HTTP mocking. If I swap frontends or add a new client, only a thin adapter changes; the core engine doesn't. |
+| **Service layer (`backend.py`) separate from API layer (`server.py`)** | The RAG/LangGraph logic doesn't know FastAPI exists. It can be unit-tested directly — call `stream_answer()`, `get_sources()` — with no HTTP mocking. If I swap frontends or add a new client, only a thin adapter changes; the core engine doesn't. |
 | **`SqliteSaver` / `AsyncSqliteSaver` instead of `MemorySaver`** | LangGraph's default `MemorySaver` loses all conversation state on process restart. Backing it with SQLite means chats survive a server restart — a small change with a big reliability payoff. |
 | **Per-document relevance grading, not just top-k retrieval** | Vector similarity ≠ relevance. A chunk can be the *closest* match and still not actually answer the question. Grading every chunk with the LLM before trusting it is what makes this "corrective" rather than "naive" RAG. |
 | **Local HuggingFace embeddings (`all-MiniLM-L6-v2`) instead of an embedding API** | No per-query embedding cost, works offline once downloaded, and keeps ingestion fast for a personal library. Trade-off: lower embedding quality than a hosted model like `text-embedding-004` — acceptable here since the CRAG grading step catches poor retrievals downstream. |
