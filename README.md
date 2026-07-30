@@ -107,3 +107,8 @@ saved_responses/        # Logs
 books/                  # Saved Books
 my_chroma_db/           # Embeddings
 ```
+
+
+uvicorn server:server --reload
+
+streamlit run streamlit_app.py

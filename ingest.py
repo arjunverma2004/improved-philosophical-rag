@@ -4,6 +4,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
+import library_store
+
 CHROMA_PERSIST_DIR = "./chroma_db"
 
 def get_embeddings_model():
@@ -47,4 +49,9 @@ def process_and_store_document(file_path: str):
         persist_directory=CHROMA_PERSIST_DIR,
         collection_name="philosophical_library"
     )
+
+    # 5. Record that this file has been ingested, so the UI can show it in the
+    # library list and skip re-ingesting the same file next time.
+    library_store.record_ingested(os.path.basename(file_path), len(docs))
+
     print("Ingestion complete!")

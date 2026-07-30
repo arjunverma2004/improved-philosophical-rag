@@ -1,47 +1,119 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
+import requests
 import streamlit as st
-from langchain_core.messages import HumanMessage, AIMessage
 
-from graph import app, memory
-from ingest import process_and_store_document
-import chat_store
-
-UPLOAD_DIR = "uploaded_books"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+API_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="Philosophical CRAG Chatbot", page_icon="🏛️", layout="wide")
+
+
+# ---------------------------------------------------------
+# Thin API client — every call to the backend goes through here.
+# ---------------------------------------------------------
+def api_create_chat():
+    r = requests.post(f"{API_URL}/chats")
+    r.raise_for_status()
+    return r.json()["thread_id"]
+
+
+def api_list_chats():
+    r = requests.get(f"{API_URL}/chats")
+    r.raise_for_status()
+    return r.json()
+
+
+def api_rename_chat(thread_id: str, title: str):
+    r = requests.patch(f"{API_URL}/chats/{thread_id}", json={"title": title})
+    r.raise_for_status()
+
+
+def api_history(thread_id: str):
+    r = requests.get(f"{API_URL}/chats/{thread_id}/history")
+    r.raise_for_status()
+    return r.json()
+
+
+def api_sources(thread_id: str):
+    r = requests.get(f"{API_URL}/chats/{thread_id}/sources")
+    r.raise_for_status()
+    return r.json()
+
+
+def api_stream_message(thread_id: str, message: str):
+    """Generator yielding response text chunks as the backend streams them."""
+    with requests.post(
+        f"{API_URL}/chats/{thread_id}/message",
+        json={"message": message},
+        stream=True,
+    ) as resp:
+        resp.raise_for_status()
+        resp.encoding = resp.encoding or "utf-8"
+        for chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
+            if chunk:
+                yield chunk
+
+
+def api_upload(filename: str, file_bytes: bytes):
+    files = {"file": (filename, file_bytes)}
+    r = requests.post(f"{API_URL}/upload", files=files)
+    r.raise_for_status()
+    return r.json()
+
+
+def api_list_library():
+    r = requests.get(f"{API_URL}/library")
+    r.raise_for_status()
+    return r.json()
+
+
+def _stream_with_thinking_indicator(token_generator):
+    """Wraps a token generator so a spinner shows during the gap before the
+    first token arrives — the CRAG pipeline runs retrieval + relevance
+    grading (and sometimes a web search) before generation even starts,
+    which otherwise looks like the UI has frozen.
+    """
+    with st.spinner("Retrieving context and reasoning..."):
+        try:
+            first_token = next(token_generator)
+        except StopIteration:
+            return
+    yield first_token
+    yield from token_generator
+
 
 # ---------------------------------------------------------
 # Session state init
 # ---------------------------------------------------------
 if "thread_id" not in st.session_state:
-    existing = chat_store.list_chats(limit=1)
-    st.session_state.thread_id = existing[0]["thread_id"] if existing else chat_store.create_chat()
+    try:
+        existing = api_list_chats()
+        st.session_state.thread_id = existing[0]["thread_id"] if existing else api_create_chat()
+    except requests.exceptions.RequestException as e:
+        st.error(
+            f"Can't reach the backend at {API_URL}. Make sure it's running "
+            f"(`uvicorn server:server --reload`).\n\nDetails: {e}"
+        )
+        st.stop()
 
 if "renaming" not in st.session_state:
     st.session_state.renaming = None
 
-
-def _load_history(thread_id: str):
-    """Reconstructs past messages for a thread from the LangGraph checkpoint."""
-    config = {"configurable": {"thread_id": thread_id}}
-    try:
-        checkpoint_tuple = memory.get_tuple(config)
-    except Exception:
-        checkpoint_tuple = None
-    if not checkpoint_tuple:
-        return []
-    channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
-    return channel_values.get("messages", [])
+if "thread_sources" not in st.session_state:
+    st.session_state.thread_sources = {}  # thread_id -> list of source dicts, for the most recent answer
 
 
 def _switch_chat(thread_id: str):
     st.session_state.thread_id = thread_id
     st.session_state.renaming = None
+
+
+def _truncate(title: str, max_len: int = 26) -> str:
+    """Keeps sidebar chat buttons single-line so they stay the same height
+    as the ✏️ rename button next to them — a long title wrapping to two
+    lines was what threw off the alignment."""
+    if len(title) <= max_len:
+        return title
+    return title[: max_len - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------
@@ -51,18 +123,27 @@ with st.sidebar:
     st.header("🏛️ Chats")
 
     if st.button("🆕 New Chat", use_container_width=True):
-        new_id = chat_store.create_chat()
-        _switch_chat(new_id)
-        st.rerun()
+        try:
+            _switch_chat(api_create_chat())
+            st.rerun()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Couldn't create a new chat: {e}")
 
     st.divider()
 
-    for chat in chat_store.list_chats():
+    try:
+        chats = api_list_chats()
+    except requests.exceptions.RequestException as e:
+        chats = []
+        st.error(f"Couldn't load chats: {e}")
+
+    for chat in chats:
         is_active = chat["thread_id"] == st.session_state.thread_id
 
-        col1, col2 = st.columns([5, 1])
+        col1, col2 = st.columns([5, 1], vertical_alignment="center")
         with col1:
-            label = f"**{chat['title']}**" if is_active else chat["title"]
+            label = _truncate(chat["title"])
+            label = f"**{label}**" if is_active else label
             if st.button(label, key=f"switch_{chat['thread_id']}", use_container_width=True):
                 _switch_chat(chat["thread_id"])
                 st.rerun()
@@ -81,7 +162,10 @@ with st.sidebar:
             rc1, rc2 = st.columns(2)
             with rc1:
                 if st.button("Save", key=f"save_{chat['thread_id']}", use_container_width=True):
-                    chat_store.touch_chat(chat["thread_id"], title=new_title.strip() or chat["title"])
+                    try:
+                        api_rename_chat(chat["thread_id"], new_title.strip() or chat["title"])
+                    except requests.exceptions.RequestException as e:
+                        st.error(f"Couldn't rename chat: {e}")
                     st.session_state.renaming = None
                     st.rerun()
             with rc2:
@@ -96,15 +180,28 @@ with st.sidebar:
         if uploaded_file is not None:
             with st.spinner("Processing and chunking document..."):
                 try:
-                    file_path = os.path.join(UPLOAD_DIR, uploaded_file.name)
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getvalue())
-                    process_and_store_document(file_path)
-                    st.success(f"Successfully ingested: {uploaded_file.name}")
-                except Exception as e:
+                    result = api_upload(uploaded_file.name, uploaded_file.getvalue())
+                    if result.get("status") == "already_ingested":
+                        st.warning(f"'{uploaded_file.name}' is already in the library.")
+                    else:
+                        st.success(f"Successfully ingested: {uploaded_file.name}")
+                    st.rerun()
+                except requests.exceptions.RequestException as e:
                     st.error(f"Failed to ingest document: {e}")
         else:
             st.warning("Please select a file first.")
+
+    st.caption("Books already in the library:")
+    try:
+        library_books = api_list_library()
+    except requests.exceptions.RequestException:
+        library_books = []
+
+    if library_books:
+        for book in library_books:
+            st.markdown(f"📄 {book['filename']}  \n`{book['chunk_count']} chunks`")
+    else:
+        st.caption("_No books ingested yet._")
 
 # ---------------------------------------------------------
 # Main chat area
@@ -112,16 +209,37 @@ with st.sidebar:
 st.title("🏛️ Philosophical CRAG Assistant")
 st.caption("Powered by Gemini, LangGraph, and Corrective RAG Architecture")
 
-history = _load_history(st.session_state.thread_id)
+try:
+    history = api_history(st.session_state.thread_id)
+except requests.exceptions.RequestException as e:
+    history = []
+    st.error(f"Couldn't load chat history: {e}")
+
+def _render_sources(sources):
+    with st.expander("📖 Sources"):
+        for src in sources:
+            snippet = src["snippet"][:800]
+            if len(src["snippet"]) > 800:
+                snippet += "..."
+            st.markdown(f"**[{src['index']}] {src['label']}**")
+            st.markdown(snippet)
+            st.markdown("---")
+
 
 if not history:
     with st.chat_message("assistant"):
         st.markdown("Greetings. I am your philosophical assistant. What concepts shall we explore today?")
 else:
-    for msg in history:
-        role = "assistant" if isinstance(msg, AIMessage) else "user"
-        with st.chat_message(role):
-            st.markdown(msg.content)
+    for i, msg in enumerate(history):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            # Only the most recent assistant turn has cached sources available
+            # (they reflect the graph's latest retrieval, not a per-message log).
+            is_last = i == len(history) - 1
+            if is_last and msg["role"] == "assistant":
+                cached = st.session_state.thread_sources.get(st.session_state.thread_id)
+                if cached:
+                    _render_sources(cached)
 
 prompt = st.chat_input("Enter your philosophical inquiry...")
 
@@ -129,61 +247,21 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    config = {"configurable": {"thread_id": st.session_state.thread_id}}
-    inputs = {
-        "messages": [HumanMessage(content=prompt)],
-        "question": prompt,
-    }
-
-    def _extract_text(content):
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "".join(
-                b.get("text", "") if isinstance(b, dict) else str(b) for b in content
-            )
-        return str(content)
-
-    def token_stream():
-        # stream_mode="messages" yields (message_chunk, metadata) tuples.
-        # We only forward tokens from the "generate" node — the grader and
-        # query-rewriter nodes also call the LLM and we don't want their
-        # internal output shown to the user.
-        for msg_chunk, metadata in app.stream(inputs, config=config, stream_mode="messages"):
-            if metadata.get("langgraph_node") == "generate":
-                text = _extract_text(msg_chunk.content)
-                if text:
-                    yield text
-
     with st.chat_message("assistant"):
         try:
-            st.write_stream(token_stream())
-        except Exception as e:
-            st.error(f"Something went wrong: {e}")
+            st.write_stream(
+                _stream_with_thinking_indicator(api_stream_message(st.session_state.thread_id, prompt))
+            )
+        except requests.exceptions.RequestException as e:
+            st.error(f"Something went wrong talking to the backend: {e}")
 
-        # Pull the final graph state (post-generation) to list cited sources.
-        final_state = app.get_state(config)
-        good_docs = final_state.values.get("good_docs", []) if final_state else []
+        try:
+            sources = api_sources(st.session_state.thread_id)
+        except requests.exceptions.RequestException:
+            sources = []
 
-        if good_docs:
-            with st.expander("📖 Sources"):
-                for i, doc in enumerate(good_docs, start=1):
-                    meta = doc.metadata or {}
-                    page = meta.get("page")
-                    source = meta.get("source", "Unknown source")
-                    label = f"{source}" + (f" (page {page + 1})" if isinstance(page, int) else "")
-                    snippet = doc.page_content[:800]
-                    if len(doc.page_content) > 800:
-                        snippet += "..."
-                    st.markdown(f"**[{i}] {label}**")
-                    st.markdown(snippet)
-                    st.markdown("---")
+        st.session_state.thread_sources[st.session_state.thread_id] = sources
 
-    # Auto-title the chat from its first user message
-    current_title = chat_store.get_chat_title(st.session_state.thread_id)
-    if current_title == "New Chat":
-        chat_store.touch_chat(st.session_state.thread_id, title=prompt.strip()[:40] or "New Chat")
-    else:
-        chat_store.touch_chat(st.session_state.thread_id)
-
+    # Note: auto-titling now happens server-side (server.py handles it after
+    # each message), so the frontend doesn't need to manage chat titles itself.
     st.rerun()
