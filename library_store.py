@@ -65,3 +65,13 @@ def list_ingested(limit: int = 50):
         {"filename": r[0], "ingested_at": r[1], "chunk_count": r[2]}
         for r in rows
     ]
+
+
+def delete_book(filename: str):
+    """Removes a book's tracking row (its Chroma chunks are removed separately
+    in ingest.py's delete_document — this only clears the 'already ingested'
+    record, so the same filename can be re-uploaded afterward)."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM ingested_books WHERE filename = ?", (filename,))
+    conn.commit()
+    conn.close()

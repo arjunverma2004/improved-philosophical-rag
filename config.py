@@ -4,6 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from paths import CHROMA_PERSIST_DIR, CHROMA_COLLECTION_NAME
 
 # ---------------------------------------------------------
 # Gemini API Setup
@@ -45,15 +46,13 @@ answer_prompt = ChatPromptTemplate.from_messages([
 # ---------------------------------------------------------
 def get_retriever():
     """Connects to the local Chroma DB and returns it as a retriever."""
-    persist_dir = "./chroma_db"
-
     # Must match the exact embedding model used in ingest.py
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
     db = Chroma(
-        persist_directory=persist_dir,
+        persist_directory=CHROMA_PERSIST_DIR,
         embedding_function=embeddings,
-        collection_name="philosophical_library"
+        collection_name=CHROMA_COLLECTION_NAME,
     )
 
     return db.as_retriever(search_kwargs={"k": 4})

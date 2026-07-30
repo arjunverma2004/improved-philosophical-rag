@@ -3,6 +3,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from state import State
 from config import llm, answer_prompt, retriever, web_search_tool
+from citations import build_sources
 
 
 def _extract_text(content) -> str:
@@ -125,4 +126,10 @@ def generate_node(state: State, config: RunnableConfig) -> State:
     ):
         full_text += _extract_text(chunk.content)
 
-    return {"messages": [AIMessage(content=full_text)]}
+    # Attach this turn's sources directly to the message (not just to the
+    # graph's shared state), so they're checkpointed *with* this specific
+    # message and survive being loaded back later — giving per-message
+    # citation history instead of only ever reflecting the latest turn.
+    sources = build_sources(state.get("good_docs", []))
+
+    return {"messages": [AIMessage(content=full_text, additional_kwargs={"sources": sources})]}

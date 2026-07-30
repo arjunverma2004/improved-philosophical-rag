@@ -1,6 +1,7 @@
 import os
 import requests
 import streamlit as st
+from urllib.parse import quote
 
 API_URL = "http://127.0.0.1:8000"
 
@@ -25,6 +26,12 @@ def api_list_chats():
 def api_rename_chat(thread_id: str, title: str):
     r = requests.patch(f"{API_URL}/chats/{thread_id}", json={"title": title})
     r.raise_for_status()
+
+
+def api_delete_chat(thread_id: str):
+    r = requests.delete(f"{API_URL}/chats/{thread_id}")
+    r.raise_for_status()
+    return r.json()
 
 
 def api_history(thread_id: str):
@@ -66,6 +73,12 @@ def api_list_library():
     return r.json()
 
 
+def api_delete_book(filename: str):
+    r = requests.delete(f"{API_URL}/library/{quote(filename, safe='')}")
+    r.raise_for_status()
+    return r.json()
+
+
 def _stream_with_thinking_indicator(token_generator):
     """Wraps a token generator so a spinner shows during the gap before the
     first token arrives — the CRAG pipeline runs retrieval + relevance
@@ -98,13 +111,17 @@ if "thread_id" not in st.session_state:
 if "renaming" not in st.session_state:
     st.session_state.renaming = None
 
-if "thread_sources" not in st.session_state:
-    st.session_state.thread_sources = {}  # thread_id -> list of source dicts, for the most recent answer
+if "confirm_delete" not in st.session_state:
+    st.session_state.confirm_delete = None
+
+if "confirm_delete_book" not in st.session_state:
+    st.session_state.confirm_delete_book = None
 
 
 def _switch_chat(thread_id: str):
     st.session_state.thread_id = thread_id
     st.session_state.renaming = None
+    st.session_state.confirm_delete = None
 
 
 def _truncate(title: str, max_len: int = 26) -> str:
@@ -150,6 +167,7 @@ with st.sidebar:
         with col2:
             if st.button("✏️", key=f"rename_btn_{chat['thread_id']}"):
                 st.session_state.renaming = chat["thread_id"]
+                st.session_state.confirm_delete = None
                 st.rerun()
 
         if st.session_state.renaming == chat["thread_id"]:
@@ -171,7 +189,42 @@ with st.sidebar:
             with rc2:
                 if st.button("Cancel", key=f"cancel_{chat['thread_id']}", use_container_width=True):
                     st.session_state.renaming = None
+                    st.session_state.confirm_delete = None
                     st.rerun()
+
+            if st.session_state.confirm_delete != chat["thread_id"]:
+                if st.button("🗑️ Delete chat", key=f"delete_btn_{chat['thread_id']}", use_container_width=True):
+                    st.session_state.confirm_delete = chat["thread_id"]
+                    st.rerun()
+            else:
+                st.warning("Delete this chat permanently? This can't be undone.")
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    if st.button("Yes, delete", key=f"confirm_delete_{chat['thread_id']}", use_container_width=True):
+                        try:
+                            api_delete_chat(chat["thread_id"])
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Couldn't delete chat: {e}")
+
+                        st.session_state.renaming = None
+                        st.session_state.confirm_delete = None
+
+                        # If we just deleted the active chat, switch to another
+                        # one (or create a fresh one if none are left).
+                        if st.session_state.thread_id == chat["thread_id"]:
+                            try:
+                                remaining = api_list_chats()
+                            except requests.exceptions.RequestException:
+                                remaining = []
+                            st.session_state.thread_id = (
+                                remaining[0]["thread_id"] if remaining else api_create_chat()
+                            )
+
+                        st.rerun()
+                with dc2:
+                    if st.button("Cancel", key=f"cancel_delete_{chat['thread_id']}", use_container_width=True):
+                        st.session_state.confirm_delete = None
+                        st.rerun()
 
     st.divider()
     st.subheader("📚 Library Management")
@@ -199,7 +252,33 @@ with st.sidebar:
 
     if library_books:
         for book in library_books:
-            st.markdown(f"📄 {book['filename']}  \n`{book['chunk_count']} chunks`")
+            bcol1, bcol2 = st.columns([5, 1], vertical_alignment="center")
+            with bcol1:
+                st.markdown(f"📄 {book['filename']}  \n`{book['chunk_count']} chunks`")
+            with bcol2:
+                if st.button("🗑️", key=f"delete_book_btn_{book['filename']}"):
+                    st.session_state.confirm_delete_book = book["filename"]
+                    st.rerun()
+
+            if st.session_state.confirm_delete_book == book["filename"]:
+                st.warning(f"Remove '{book['filename']}' from the library permanently?")
+                bd1, bd2 = st.columns(2)
+                with bd1:
+                    if st.button(
+                        "Yes, delete", key=f"confirm_delete_book_{book['filename']}", use_container_width=True
+                    ):
+                        try:
+                            api_delete_book(book["filename"])
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Couldn't delete book: {e}")
+                        st.session_state.confirm_delete_book = None
+                        st.rerun()
+                with bd2:
+                    if st.button(
+                        "Cancel", key=f"cancel_delete_book_{book['filename']}", use_container_width=True
+                    ):
+                        st.session_state.confirm_delete_book = None
+                        st.rerun()
     else:
         st.caption("_No books ingested yet._")
 
@@ -230,16 +309,14 @@ if not history:
     with st.chat_message("assistant"):
         st.markdown("Greetings. I am your philosophical assistant. What concepts shall we explore today?")
 else:
-    for i, msg in enumerate(history):
+    for msg in history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            # Only the most recent assistant turn has cached sources available
-            # (they reflect the graph's latest retrieval, not a per-message log).
-            is_last = i == len(history) - 1
-            if is_last and msg["role"] == "assistant":
-                cached = st.session_state.thread_sources.get(st.session_state.thread_id)
-                if cached:
-                    _render_sources(cached)
+            # Each assistant message carries its own sources now (persisted
+            # per-message on the backend), so every past answer's citations
+            # are shown here, not just the most recent one.
+            if msg["role"] == "assistant" and msg.get("sources"):
+                _render_sources(msg["sources"])
 
 prompt = st.chat_input("Enter your philosophical inquiry...")
 
@@ -255,13 +332,7 @@ if prompt:
         except requests.exceptions.RequestException as e:
             st.error(f"Something went wrong talking to the backend: {e}")
 
-        try:
-            sources = api_sources(st.session_state.thread_id)
-        except requests.exceptions.RequestException:
-            sources = []
-
-        st.session_state.thread_sources[st.session_state.thread_id] = sources
-
     # Note: auto-titling now happens server-side (server.py handles it after
-    # each message), so the frontend doesn't need to manage chat titles itself.
+    # each message), and sources are now persisted per-message on the
+    # backend too — so a plain rerun is enough to pick up both.
     st.rerun()

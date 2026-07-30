@@ -16,9 +16,11 @@ import os
 from langchain_core.messages import HumanMessage, AIMessage
 
 from graph import app, memory
+import ingest
 from ingest import process_and_store_document
 import chat_store
 import library_store
+from paths import UPLOAD_DIR
 
 
 def _extract_text(content) -> str:
@@ -60,12 +62,34 @@ def touch_chat(thread_id: str):
     chat_store.touch_chat(thread_id)
 
 
+def delete_chat(thread_id: str):
+    """Deletes a chat's session metadata, and best-effort clears its
+    LangGraph checkpoint data too (so it doesn't linger orphaned in
+    checkpoints.db)."""
+    chat_store.delete_chat(thread_id)
+    try:
+        memory.delete_thread(thread_id)
+    except AttributeError:
+        # Older versions of langgraph-checkpoint-sqlite don't have
+        # delete_thread() — safe to skip, it's just cleanup.
+        pass
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------
 # Conversation history + answering
 # ---------------------------------------------------------
 def load_history(thread_id: str):
     """Returns past messages for a thread as plain dicts:
-    [{'role': 'user' | 'assistant', 'content': str}, ...]
+    [{'role': 'user' | 'assistant', 'content': str, 'sources': [...]}, ...]
+
+    Each assistant message carries its OWN sources (attached at generation
+    time in nodes.py and persisted with the message via the checkpointer),
+    so this gives full per-message citation history, not just the latest
+    turn's. User messages always have sources: [].
+    Older messages generated before this existed simply have no "sources"
+    key in additional_kwargs and default to an empty list here.
     """
     config = {"configurable": {"thread_id": thread_id}}
     try:
@@ -79,13 +103,15 @@ def load_history(thread_id: str):
     channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
     messages = channel_values.get("messages", [])
 
-    return [
-        {
-            "role": "assistant" if isinstance(msg, AIMessage) else "user",
+    history = []
+    for msg in messages:
+        is_ai = isinstance(msg, AIMessage)
+        history.append({
+            "role": "assistant" if is_ai else "user",
             "content": msg.content,
-        }
-        for msg in messages
-    ]
+            "sources": (msg.additional_kwargs.get("sources", []) if is_ai else []),
+        })
+    return history
 
 
 def stream_answer(thread_id: str, user_message: str):
@@ -109,37 +135,15 @@ def stream_answer(thread_id: str, user_message: str):
 
 
 def get_sources(thread_id: str):
-    """Returns the sources used in the most recent answer on this thread, as:
-    [{'index': 1, 'label': 'oldmansea.pdf (page 12)', 'snippet': '...'}, ...]
-    Indexes line up with the [1], [2] citation markers in the answer text.
+    """Returns the sources used in the most recent answer on this thread.
+    Kept as a convenience/standalone endpoint — full per-message citation
+    history is available via load_history() instead.
     """
-    config = {"configurable": {"thread_id": thread_id}}
-    state = app.get_state(config)
-    docs = state.values.get("good_docs", []) if state else []
-
-    sources = []
-    for i, doc in enumerate(docs, start=1):
-        meta = doc.metadata or {}
-        raw_source = meta.get("source", "Unknown source")
-        page = meta.get("page")
-
-        # Local PDFs/TXTs store a full file path in metadata — show just the
-        # filename. Web search results store a URL — show it as-is.
-        if isinstance(raw_source, str) and raw_source.startswith(("http://", "https://")):
-            label = raw_source
-        else:
-            label = os.path.basename(str(raw_source))
-
-        if isinstance(page, int):
-            label += f" (page {page + 1})"
-
-        sources.append({
-            "index": i,
-            "label": label,
-            "snippet": doc.page_content,
-        })
-
-    return sources
+    history = load_history(thread_id)
+    for entry in reversed(history):
+        if entry["role"] == "assistant":
+            return entry["sources"]
+    return []
 
 
 # ---------------------------------------------------------
@@ -169,3 +173,17 @@ def list_ingested_books():
     [{'filename': ..., 'ingested_at': ..., 'chunk_count': ...}, ...]
     """
     return library_store.list_ingested()
+
+
+def delete_ingested_book(filename: str):
+    """Removes a book entirely: its chunks from Chroma, its tracking row
+    (so the same filename can be re-uploaded afterward), and best-effort
+    the physical uploaded file on disk."""
+    ingest.delete_document(filename)
+    library_store.delete_book(filename)
+
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    try:
+        os.remove(file_path)
+    except OSError:
+        pass  # already gone, or never existed on disk — not worth failing over

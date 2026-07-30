@@ -5,12 +5,18 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
 import library_store
-
-CHROMA_PERSIST_DIR = "./chroma_db"
+from paths import UPLOAD_DIR, CHROMA_PERSIST_DIR, CHROMA_COLLECTION_NAME
 
 def get_embeddings_model():
     """Initializes the lightweight local Hugging Face embedding model."""
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+def _get_chroma_store():
+    return Chroma(
+        persist_directory=CHROMA_PERSIST_DIR,
+        embedding_function=get_embeddings_model(),
+        collection_name=CHROMA_COLLECTION_NAME,
+    )
 
 def process_and_store_document(file_path: str):
     """Loads a PDF or TXT, chunks it locally, and stores it in Chroma."""
@@ -41,13 +47,11 @@ def process_and_store_document(file_path: str):
 
     # 4. Ingest into Chroma DB 
     print("Ingesting chunks into local vector database using Hugging Face...")
-    embeddings = get_embeddings_model()
-    
     Chroma.from_documents(
         documents=docs,
-        embedding=embeddings,
+        embedding=get_embeddings_model(),
         persist_directory=CHROMA_PERSIST_DIR,
-        collection_name="philosophical_library"
+        collection_name=CHROMA_COLLECTION_NAME,
     )
 
     # 5. Record that this file has been ingested, so the UI can show it in the
@@ -55,3 +59,17 @@ def process_and_store_document(file_path: str):
     library_store.record_ingested(os.path.basename(file_path), len(docs))
 
     print("Ingestion complete!")
+
+
+def delete_document(filename: str):
+    """Removes every chunk belonging to `filename` from the Chroma library.
+
+    Chunks are matched by their 'source' metadata field, which was set at
+    ingestion time to the full path the file was loaded from
+    (UPLOAD_DIR/filename) — reconstructing that same path here is what lets
+    this find the right chunks to delete.
+    """
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    store = _get_chroma_store()
+    store.delete(where={"source": file_path})
+    print(f"Deleted all chunks for {filename} from the vector library.")

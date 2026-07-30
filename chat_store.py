@@ -80,3 +80,11 @@ def get_chat_title(thread_id: str):
     ).fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def delete_chat(thread_id: str):
+    """Removes a chat session's metadata row."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM chat_sessions WHERE thread_id = ?", (thread_id,))
+    conn.commit()
+    conn.close()

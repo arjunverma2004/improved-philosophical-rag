@@ -19,7 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-import backend as chat_service  # the internal service layer, not part of the public API
+import backend as chat_service
+from paths import UPLOAD_DIR
 
 server = FastAPI(
     title="Philosophical CRAG API",
@@ -36,7 +37,6 @@ server.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "uploaded_books"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -54,14 +54,15 @@ class RenameRequest(BaseModel):
 class MessageRequest(BaseModel):
     message: str
 
-class HistoryMessage(BaseModel):
-    role: str
-    content: str
-
 class Source(BaseModel):
     index: int
     label: str
     snippet: str
+
+class HistoryMessage(BaseModel):
+    role: str
+    content: str
+    sources: List[Source] = []
 
 
 # ---------------------------------------------------------
@@ -87,6 +88,12 @@ def rename_chat(thread_id: str, req: RenameRequest):
         raise HTTPException(status_code=400, detail="Title cannot be empty.")
     chat_service.rename_chat(thread_id, title)
     return {"thread_id": thread_id, "title": title}
+
+
+@server.delete("/chats/{thread_id}")
+def delete_chat(thread_id: str):
+    chat_service.delete_chat(thread_id)
+    return {"thread_id": thread_id, "status": "deleted"}
 
 
 @server.get("/chats/{thread_id}/history", response_model=List[HistoryMessage])
@@ -146,6 +153,20 @@ class LibraryBook(BaseModel):
 def get_library():
     """Lists books already ingested into the vector library."""
     return chat_service.list_ingested_books()
+
+
+@server.delete("/library/{filename}")
+def delete_book(filename: str):
+    """Removes a book's chunks from the vector library entirely, and clears
+    its 'already ingested' record so it can be re-uploaded later."""
+    try:
+        chat_service.delete_ingested_book(filename)
+    except Exception as e:
+        print("\n--- LIBRARY DELETE ERROR TRACEBACK ---")
+        traceback.print_exc()
+        print("---------------------------------------\n")
+        raise HTTPException(status_code=500, detail=f"Failed to delete book: {str(e)}")
+    return {"filename": filename, "status": "deleted"}
 
 
 @server.post("/upload")
